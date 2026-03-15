@@ -4,166 +4,159 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 import io
-import random
 
-# 1. CONFIGURACIÓN Y ESTILO
-st.set_page_config(page_title="V2500 Master Fan Balancer", layout="wide")
+# 1. CONFIGURACIÓN
+st.set_page_config(page_title="V2500 Fleet DSS - Pro", layout="wide")
 
 st.markdown("""
     <style>
-    .stMetric { border-radius: 12px; border: 1px solid #58a6ff; background: white; padding: 15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.05); }
-    .bolt-card { border: 3px solid #ff4b4b; padding: 20px; border-radius: 10px; background: #fff5f5; text-align: center; }
-    [data-testid="stExpander"] { border: 1px solid #58a6ff; border-radius: 10px; margin-bottom: 20px; background-color: #fdfdfd; }
+    .stMetric { border: 2px solid #58a6ff; background: #f0f7ff; padding: 10px; border-radius: 8px; }
+    .motor-header { background-color: #1e3a8a; color: white; padding: 10px; border-radius: 5px; margin-top: 25px; }
+    .excelencia { border: 2px solid #2ecc71; background: #e8f5e9; padding: 15px; border-radius: 10px; color: #2e7d32; font-weight: bold; text-align: center; }
+    .bolt-info { background-color: #fff5f5; border-left: 5px solid #ff4b4b; padding: 10px; margin-top: 10px; color: #c53030; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("⚙️ V2500 Aero-Master: Gestión Circular de Flotas")
+st.title("🛡️ V2500 Aero-Master: Decision Support System")
 
 with st.sidebar:
-    st.header("🛂 Panel de Control")
-    tecnico = st.text_input("Técnico Certificado", "Nivel II")
-    st.divider()
-    uploaded_file = st.file_uploader("Cargar Datos (.xlsx, .csv)", type=["xlsx", "csv"])
-    st.info("El archivo debe tener las columnas: 'Motor', 'Slot', 'Peso'.")
+    st.header("⚙️ Configuración de Planta")
+    tecnico = st.text_input("Técnico Responsable", "")
+    uploaded_file = st.file_uploader("Subir Excel Multimotor", type=["xlsx", "csv"])
+    TOLERANCIA_AMM = 0.50 
+    UMBRAL_EXCELENCIA = 0.10
 
-# --- FUNCIONES DE CÁLCULO ---
+# --- LÓGICA DE CÁLCULO ---
 def calc_stats(df, slot_col):
     m1 = df[df[slot_col] <= 11]['Peso'].sum()
     m2 = df[df[slot_col] > 11]['Peso'].sum()
     diff = m1 - m2
-    return abs(diff), diff
+    return round(abs(diff), 2), round(diff, 2)
 
-# --- GRÁFICO CIRCULAR DE ALTA VISIBILIDAD ---
-def render_circular_fan(data, slot_col, titulo, bolt_w=0, bolt_s=0, is_final=False):
+def get_moves(df):
+    return len(df[df['Slot_Original'] != df['Nuevo_Slot']])
+
+def generate_three_options(df_m):
+    v_ini, d_ini = calc_stats(df_m, 'Slot_Original')
+    df_base = df_m.copy()
+    df_base['Nuevo_Slot'] = df_base['Slot_Original']
+    
+    best_bal = {"v": v_ini, "df": df_base.copy(), "moves": 0, "diff": d_ini}
+    best_min_moves = {"v": v_ini, "df": df_base.copy(), "moves": 0, "diff": d_ini}
+    best_mid = {"v": v_ini, "df": df_base.copy(), "moves": 0, "diff": d_ini}
+    
+    for _ in range(8000):
+        temp = df_m.sample(frac=1).reset_index(drop=True)
+        temp['Nuevo_Slot'] = range(1, 23)
+        v_t, d_t = calc_stats(temp, 'Nuevo_Slot')
+        m_t = get_moves(temp)
+        
+        if v_t < best_bal["v"]:
+            best_bal = {"v": v_t, "df": temp.copy(), "moves": m_t, "diff": d_t}
+        if v_t <= TOLERANCIA_AMM:
+            if m_t < best_min_moves["moves"] or best_min_moves["v"] > TOLERANCIA_AMM:
+                best_min_moves = {"v": v_t, "df": temp.copy(), "moves": m_t, "diff": d_t}
+        if v_t <= 0.15:
+            if m_t < best_mid["moves"] or best_mid["v"] > 0.15:
+                best_mid = {"v": v_t, "df": temp.copy(), "moves": m_t, "diff": d_t}
+
+    return [
+        {"name": "1. Máximo Balance (Prioriza 0.00)", "data": best_bal},
+        {"name": "2. Mínimos Movimientos (Default < 0.50)", "data": best_min_moves},
+        {"name": "3. Opción Equilibrada (Vib < 0.15)", "data": best_mid}
+    ]
+
+def render_visual_fan(data, slot_col, titulo, bolt_w=0, bolt_s=0):
     fig = go.Figure()
     theta = np.linspace(0, 360, 22, endpoint=False)
-    
-    # Colores según acción
-    colors = []
-    for s in range(1, 23):
-        row = data[data[slot_col] == s].iloc[0]
-        if is_final and 'Acción' in data.columns and "MOVER" in str(row['Acción']):
-            colors.append('#ff9800') # Naranja: Requiere movimiento
-        else:
-            colors.append('#1f77b4') # Azul: Posición correcta
+    colores = ["#e74c3c" if row['Slot_Original'] != row['Nuevo_Slot'] else "#2ecc71" 
+               for _, row in data.sort_values(by=slot_col).iterrows()]
 
-    # Dibujar el cuerpo de los álabes
-    fig.add_trace(go.Barpolar(
-        r=[8]*22, theta=theta, width=[14]*22,
-        marker=dict(color=colors, line=dict(color='white', width=2)),
-        hoverinfo="none"
-    ))
-    
-    # Texto de los IDs de álabes (Dentro de la pieza)
+    fig.add_trace(go.Barpolar(r=[8]*22, theta=theta, width=[14]*22, marker_color=colores, marker_line_color="white", marker_line_width=1.5))
     for i in range(22):
-        pieza = data[data[slot_col] == (i+1)].iloc[0]
-        fig.add_trace(go.Scatterpolar(
-            r=[6.2], theta=[theta[i]], mode='text',
-            text=[f"<b>{pieza['ID_Original']}</b>"],
-            textfont=dict(size=14, color="white")
-        ))
-
-    # Indicador de Peso de Compensación (Bolt)
-    if bolt_w > 0.01:
-        fig.add_trace(go.Scatterpolar(
-            r=[4.5], theta=[theta[bolt_s-1]], mode='markers+text',
-            marker=dict(symbol="star", size=25, color="#f1c40f", line=dict(width=2, color="red")),
-            text=[f"<b>BOLT {bolt_w:.2f}g</b>"], textposition="bottom center",
-            textfont=dict(size=14, color="red")
-        ))
-
-    fig.update_layout(
-        title=dict(text=f"<b>{titulo}</b>", font=dict(size=22, color="#1f77b4")),
-        polar=dict(
-            bgcolor='white',
-            angularaxis=dict(
-                tickvals=theta, 
-                ticktext=[f"<b>{i+1}</b>" for i in range(22)], # NÚMERO DE SLOT EXTERIOR
-                rotation=90, direction="clockwise", gridcolor="#e0e0e0",
-                tickfont=dict(size=18, color="black")
-            ),
-            radialaxis=dict(visible=False, range=[0, 10])
-        ),
-        showlegend=False, height=700, margin=dict(t=80, b=80, l=50, r=50)
-    )
+        row = data[data[slot_col] == (i+1)].iloc[0]
+        fig.add_trace(go.Scatterpolar(r=[6], theta=[theta[i]], mode='text', text=[f"<b>{row['ID_Original']}</b>"], textfont=dict(size=14, color="white")))
+    
+    if bolt_w > UMBRAL_EXCELENCIA:
+        fig.add_trace(go.Scatterpolar(r=[4], theta=[theta[bolt_s-1]], mode='markers+text', marker=dict(symbol="star", size=25, color="#f1c40f"),
+                                     text=[f"BOLT {bolt_w:.2f}"], textposition="bottom center", textfont=dict(size=12, color="red")))
+    
+    fig.update_layout(title=f"<b>{titulo}</b>", polar=dict(bgcolor='white', angularaxis=dict(tickvals=theta, ticktext=[str(i+1) for i in range(22)], rotation=90, direction="clockwise")),
+                      showlegend=False, height=500, margin=dict(t=50, b=30, l=30, r=30))
     return fig
 
 # --- PROCESAMIENTO ---
 if uploaded_file:
     try:
-        # Blindaje contra errores de Android (lectura directa de bytes)
-        file_content = uploaded_file.read()
-        if uploaded_file.name.endswith('.csv'):
-            df_full = pd.read_csv(io.BytesIO(file_content))
-        else:
-            df_full = pd.read_excel(io.BytesIO(file_content), engine='openpyxl')
-        
+        uploaded_file.seek(0)
+        df_full = pd.read_excel(uploaded_file, engine='openpyxl')
         df_full.columns = [c.strip().capitalize() for c in df_full.columns]
-        motores_ids = df_full['Motor'].unique()
-        fleet_results = []
+        fleet_selection = {}
 
-        for idx, m_name in enumerate(motores_ids):
-            with st.expander(f"📦 MOTOR: {m_name}", expanded=True):
-                df_m = df_full[df_full['Motor'] == m_name].copy()
-                df_m['ID_Original'] = [f"Á{int(s)}" for s in df_m['Slot']]
-                df_m['Slot_Original'] = df_m['Slot'].astype(int)
-                
-                v_ini, d_ini = calc_stats(df_m, 'Slot_Original')
+        for idx, m_name in enumerate(df_full['Motor'].unique()):
+            st.markdown(f"<div class='motor-header'><h3>📦 MOTOR: {m_name}</h3></div>", unsafe_allow_html=True)
+            df_m = df_full[df_full['Motor'] == m_name].copy()
+            df_m['ID_Original'] = [f"A{int(s)}" for s in df_m['Slot']]
+            df_m['Slot_Original'] = df_m['Slot'].astype(int)
+            
+            opts_list = generate_three_options(df_m)
+            opt_names = [o["name"] for o in opts_list]
+            
+            col_sel, col_metrics = st.columns([1, 2])
+            with col_sel:
+                selected_name = st.radio(f"Estrategia:", opt_names, index=1, key=f"r_{idx}")
+                choice = next(o["data"] for o in opts_list if o["name"] == selected_name)
+                bolt_w = choice['v']
+                bolt_s = 17 if choice['diff'] > 0 else 6
 
-                # Optimización Global (Consistencia absoluta con 15k pruebas)
-                best_v = v_ini
-                best_df = df_m.copy()
-                pesos_lista = df_m.copy()
-                for _ in range(15000):
-                    temp = pesos_lista.sample(frac=1).reset_index(drop=True)
-                    temp['Test_Slot'] = range(1, 23)
-                    v_t, d_t = calc_stats(temp, 'Test_Slot')
-                    if v_t < best_v:
-                        best_v = v_t; best_df = temp.copy(); best_df['Nuevo_Slot'] = best_df['Test_Slot']; best_d = d_t
-
-                if best_v < (v_ini - 0.01):
-                    df_final = best_df; v_f = best_v; d_f = best_d; usa_prop = True
+            with col_metrics:
+                if choice['v'] <= UMBRAL_EXCELENCIA:
+                    st.markdown(f"<div class='excelencia'>🏆 EXCELENCIA: {choice['v']:.2f} ips<br><small>No requiere pesos adicionales.</small></div>", unsafe_allow_html=True)
                 else:
-                    df_final = df_m.copy(); df_final['Nuevo_Slot'] = df_final['Slot_Original']; v_f = v_ini; d_f = d_ini; usa_prop = False
+                    c1, c2, c3 = st.columns(3)
+                    v_ini_m, _ = calc_stats(df_m, 'Slot_Original')
+                    c1.metric("Vib. Inicial", f"{v_ini_m:.2f}")
+                    c2.metric("Vib. Final", f"{choice['v']:.2f}")
+                    c3.metric("Mover", f"{choice['moves']} álabes")
+                    st.markdown(f"<div class='bolt-info'>⚖️ <b>COMPENSACIÓN:</b> Instalar {bolt_w:.2f}g en alojamiento de tornillo eje Slot {bolt_s}</div>", unsafe_allow_html=True)
 
-                bolt_w = v_f
-                bolt_s = 17 if d_f > 0 else 6
-                
-                # Asignar Acción para el gráfico
-                df_final['Acción'] = df_final.apply(lambda x: "MANTENER" if x['Slot_Original'] == x['Nuevo_Slot'] else f"MOVER AL {int(x['Nuevo_Slot'])}", axis=1)
+            g1, g2 = st.columns(2)
+            df_ini_view = df_m.copy(); df_ini_view['Nuevo_Slot'] = df_ini_view['Slot_Original']
+            with g1: st.plotly_chart(render_visual_fan(df_ini_view, 'Slot_Original', "AS FOUND"), use_container_width=True, key=f"g1_{idx}")
+            with g2: st.plotly_chart(render_visual_fan(choice['df'], 'Nuevo_Slot', f"AS LEFT"), use_container_width=True, key=f"g2_{idx}")
 
-                # MÉTRICAS
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Vib. Inicial", f"{v_ini:.2f}")
-                c2.metric("Vib. Propuesta", f"{v_f:.2f}", delta=f"-{v_ini-v_f:.2f}" if usa_prop else None)
-                c3.metric("Masa Bolt", f"{bolt_w:.2f}")
-                c4.metric("Slot Bolt", f"{bolt_s}")
+            # --- TABLA DE TALLER CON COLUMNA DE PESO/BOLT ---
+            df_tab = choice['df'][['ID_Original', 'Peso', 'Slot_Original', 'Nuevo_Slot']].copy()
+            df_tab['Acción'] = df_tab.apply(lambda x: "✅ MANTENER" if x['Slot_Original'] == x['Nuevo_Slot'] else f"➔ MOVER AL {int(x['Nuevo_Slot'])}", axis=1)
+            
+            # Nueva Columna de Compensación
+            df_tab['Compensación (Bolt)'] = ""
+            if bolt_w > UMBRAL_EXCELENCIA:
+                mask = df_tab['Nuevo_Slot'] == bolt_s
+                df_tab.loc[mask, 'Compensación (Bolt)'] = f"🔩 INSTALAR {bolt_w:.2f}g"
 
-                # GRÁFICOS CIRCULARES
-                g_ini, g_fin = st.columns(2)
-                with g_ini: st.plotly_chart(render_circular_fan(df_m, 'Slot_Original', "AS FOUND (ACTUAL)"), use_container_width=True, key=f"p1_{idx}")
-                with g_fin: st.plotly_chart(render_circular_fan(df_final, 'Nuevo_Slot', "AS LEFT (PROPUESTA)", bolt_w, bolt_s, is_final=True), use_container_width=True, key=f"p2_{idx}")
-                
-                # TABLA DE TALLER
-                st.write("### 📋 Guía de Movimientos")
-                st.dataframe(df_final[['ID_Original', 'Peso', 'Slot_Original', 'Nuevo_Slot', 'Acción']].sort_values(by='Slot_Original'), use_container_width=True)
-                
-                fleet_results.append({'Motor': m_name, 'Data': df_final, 'v_ini': v_ini, 'v_f': v_f, 'bolt': bolt_w, 'slot': bolt_s})
+            st.write("**Hoja de Ruta de Movimientos y Pesos:**")
+            st.table(df_tab.sort_values(by='Slot_Original').style.apply(
+                lambda x: ['background-color: #f8d7da' if 'MOVER' in str(v) or 'INSTALAR' in str(v) else 'background-color: #d4edda' for v in x], axis=1))
+            
+            fleet_selection[m_name] = {"choice": choice, "df_final": df_tab, "bolt_w": bolt_w, "bolt_s": bolt_s}
 
-        # EXPORTACIÓN EXCEL
-        def get_fleet_report(results):
+        # EXPORTACIÓN
+        def get_xlsx(selections):
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                resumen = pd.DataFrame([{'Motor': r['Motor'], 'Vib_Ini': r['v_ini'], 'Vib_Fin': r['v_f'], 'Bolt': r['bolt'], 'Slot': r['slot']} for r in results])
-                resumen.to_excel(writer, sheet_name='RESUMEN_FLOTA', index=False)
-                for r in results:
-                    r['Data'][['ID_Original', 'Peso', 'Slot_Original', 'Nuevo_Slot', 'Acción']].to_excel(writer, sheet_name=f"Steps_{r['Motor']}", index=False)
+                summary = []
+                for m, info in selections.items():
+                    summary.append({'Motor': m, 'Vib_Final': info['choice']['v'], 'Movimientos': info['choice']['moves'], 'Bolt_Masa': info['bolt_w'], 'Bolt_Slot': info['bolt_s']})
+                pd.DataFrame(summary).to_excel(writer, sheet_name='RESUMEN', index=False)
+                for m, info in selections.items():
+                    info['df_final'].to_excel(writer, sheet_name=f"TALLER_{m}", index=False)
             return output.getvalue()
 
         st.sidebar.divider()
-        st.sidebar.download_button("📥 DESCARGAR REPORTE DE FLOTA", data=get_fleet_report(fleet_results), file_name="Flota_V2500_Final.xlsx")
+        st.sidebar.download_button("📥 DESCARGAR PLAN DE TALLER", data=get_xlsx(fleet_selection), file_name="Balanceo_V2500_Completo.xlsx")
 
     except Exception as e:
-        st.error(f"Error de procesamiento: {e}")
+        st.error(f"Error: {e}")
 else:
-    st.info("Cargue un Excel con la columna 'Motor' para iniciar el estudio de flota con referencia circular.")
+    st.info("Esperando Excel Multimotor...")
