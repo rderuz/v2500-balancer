@@ -18,7 +18,6 @@ st.markdown("""
 
 # --- NÚCLEO TÉCNICO ---
 def get_v2500_metrics(df, slot_col, metodo):
-    # Radio de conversión real V2500 (mm) para pasar de Momento a Masa de Perno
     RADIO_CONV = 165.0 
     if "Vectorial" in metodo:
         res_x, res_y = 0.0, 0.0
@@ -47,9 +46,7 @@ def render_fan(data, slot_col, titulo, bolt_w=0, bolt_s=0):
     for _, row in data.sort_values(by=slot_col).iterrows():
         if 'nuevo_slot' in row and 'slot_original' in row:
             colores.append("#e74c3c" if row['slot_original'] != row['nuevo_slot'] else "#2ecc71")
-        else:
-            colores.append("#2ecc71")
-    
+        else: colores.append("#2ecc71")
     fig.add_trace(go.Barpolar(r=[8]*22, theta=theta, width=[14]*22, marker_color=colores, marker_line_color="white"))
     for i in range(22):
         row = data[data[slot_col] == (i+1)].iloc[0]
@@ -71,13 +68,11 @@ with st.sidebar:
 
 # --- LÓGICA DE MEMORIA Y PROCESO ---
 if uploaded_file:
-    # Identificador único de ejecución para evitar re-calculos innecesarios
     config_id = f"{uploaded_file.name}_{metodo_calc}_{ITERACIONES}"
     
     if "last_config_id" not in st.session_state or st.session_state.last_config_id != config_id:
         st.session_state.last_config_id = config_id
         st.session_state.resultados_motores = {}
-
         df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
         df_raw.columns = df_raw.columns.str.strip().str.lower()
         df_full = df_raw.copy()
@@ -86,67 +81,41 @@ if uploaded_file:
             df_m = df_full[df_full['motor'] == m_name].copy()
             df_m['slot_original'] = df_m['slot'].astype(int)
             df_m['nuevo_slot'] = df_m['slot_original']
-            
             v_ini, b_ini, s_ini = get_v2500_metrics(df_m, 'slot_original', metodo_calc)
             
-            # Inicialización de las 3 memorias de estrategia
             est_min_vib = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
             est_eficiencia = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
             est_balance = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
 
             progress_bar = st.progress(0)
-            status_text = st.empty()
-            
             for i in range(ITERACIONES):
                 temp = df_m.sample(frac=1).reset_index(drop=True)
                 temp['nuevo_slot'] = range(1, 23)
                 vt, bw, bs = get_v2500_metrics(temp, 'nuevo_slot', metodo_calc)
                 mt = len(temp[temp['slot_original'] != temp['nuevo_slot']])
-                
-                # 1. Estrategia Mínima Vibración
-                if vt < est_min_vib["v"]:
-                    est_min_vib = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
-                
-                # 2. Estrategia Eficiencia (Cumplir tolerancia con mínimo esfuerzo)
+                if vt < est_min_vib["v"]: est_min_vib = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
                 if vt <= TOLERANCIA:
                     if mt < est_eficiencia["moves"] or est_eficiencia["v"] > TOLERANCIA:
                         est_eficiencia = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
-                
-                # 3. Estrategia Balanceada (Mejora sustancial con movimientos limitados)
                 if vt < (v_ini * 0.5) and mt <= 10:
-                    if vt < est_balance["v"]:
-                        est_balance = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
-                
-                if i % 3000 == 0: 
-                    progress_bar.progress(i / ITERACIONES)
-                    status_text.text(f"Procesando {m_name}... {i}/{ITERACIONES}")
-            
+                    if vt < est_balance["v"]: est_balance = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
+                if i % 3000 == 0: progress_bar.progress(i / ITERACIONES)
             progress_bar.empty()
-            status_text.empty()
-            
             st.session_state.resultados_motores[m_name] = {
                 "ini": (v_ini, b_ini, s_ini, df_m),
-                "estrategias": {
-                    "🚀 Mínima Vibración": est_min_vib,
-                    "⚖️ Eficiencia Operativa": est_eficiencia,
-                    "🛠️ Balanceado Moderado": est_balance
-                }
+                "estrategias": {"🚀 Mínima Vibración": est_min_vib, "⚖️ Eficiencia Operativa": est_eficiencia, "🛠️ Balanceado Moderado": est_balance}
             }
 
-    # --- RENDERIZADO (REACCIÓN INSTANTÁNEA) ---
+    # --- RENDERIZADO ---
     plan_taller_hojas = {}
     resumen_flota = []
 
     for m_name, datos in st.session_state.resultados_motores.items():
         st.markdown(f"<div class='motor-header'><h3>📦 MOTOR: {m_name}</h3></div>", unsafe_allow_html=True)
         v_ini, b_ini, s_ini, df_m_ini = datos["ini"]
-        
-        st.markdown("<div class='estrategia-box'>", unsafe_allow_html=True)
         seleccionada = st.radio(f"Plan de Trabajo para {m_name}:", list(datos["estrategias"].keys()), horizontal=True, key=f"sel_{m_name}")
         res = datos["estrategias"][seleccionada]
-        st.markdown("</div>", unsafe_allow_html=True)
 
-        # MÉTRICAS CLAVE
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Vib. Inicial", f"{v_ini:.2f} ips")
         c2.metric("Vib. tras Movimientos", f"{res['v']:.2f} ips")
@@ -157,32 +126,29 @@ if uploaded_file:
         with g1: st.plotly_chart(render_fan(df_m_ini, 'slot_original', "AS FOUND"), use_container_width=True, key=f"p1_{m_name}")
         with g2: st.plotly_chart(render_fan(res['df'], 'nuevo_slot', "AS LEFT", res['bolt'], res['slot']), use_container_width=True, key=f"p2_{m_name}")
         
-        # TABLA DE TALLER
         df_tab = res['df'][['slot_original', 'peso', 'nuevo_slot']].copy()
         df_tab['Acción'] = df_tab.apply(lambda x: "✅ MANTENER" if x['slot_original'] == x['nuevo_slot'] else f"➔ AL {int(x['nuevo_slot'])}", axis=1)
         st.table(df_tab.sort_values(by='slot_original').style.apply(lambda x: ['background-color: #d4edda' if 'MANTENER' in str(v) else 'background-color: #f8d7da' for v in x], axis=1))
         
-        # Preparar para el Excel detallado
+        # --- CORRECCIÓN EXPORTACIÓN EXCEL ---
         export_df = df_tab.sort_values(by='slot_original').copy()
-        export_df['Peso_Perno_g'] = res['bolt']
-        export_df['Slot_Perno'] = res['slot']
+        export_df['Perno_g'] = ""
+        export_df['Slot_Perno'] = ""
+        # Solo ponemos el peso y el slot en la fila que coincide con el Slot_Perno seleccionado
+        export_df.loc[export_df['nuevo_slot'] == res['slot'], 'Perno_g'] = res['bolt']
+        export_df.loc[export_df['nuevo_slot'] == res['slot'], 'Slot_Perno'] = res['slot']
         export_df['Estrategia'] = seleccionada
-        plan_taller_hojas[m_name] = export_df
         
-        resumen_flota.append({
-            "Motor": m_name, "Vib_Inicial": v_ini, "Vib_Tras_Mov": res['v'], 
-            "Movimientos": res['moves'], "Perno_g": res['bolt'], "Slot_Perno": res['slot']
-        })
+        plan_taller_hojas[m_name] = export_df
+        resumen_flota.append({"Motor": m_name, "Vib_Inicial": v_ini, "Vib_Final": res['v'], "Perno_g": res['bolt'], "Slot_Perno": res['slot'], "Movimientos": res['moves']})
 
-    # EXPORTACIÓN FINAL
     st.divider()
     output_buffer = io.BytesIO()
     with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
         pd.DataFrame(resumen_flota).to_excel(writer, sheet_name="RESUMEN_EJECUTIVO", index=False)
         for m, d in plan_taller_hojas.items():
             d.to_excel(writer, sheet_name=f"Plan_{m}"[:30], index=False)
-    
-    st.download_button("📥 DESCARGAR PLAN DE TALLER COMPLETO (EXCEL)", data=output_buffer.getvalue(), file_name="Plan_Mantenimiento_V2500_Final.xlsx")
+    st.download_button("📥 DESCARGAR PLAN DE TALLER CORREGIDO", data=output_buffer.getvalue(), file_name="Plan_V2500_Final_Corregido.xlsx")
 
 else:
-    st.info("👋 Suba el archivo Excel para procesar los motores. Los cálculos se guardarán en memoria para cambios instantáneos.")
+    st.info("👋 Suba el archivo Excel para procesar los motores.")
