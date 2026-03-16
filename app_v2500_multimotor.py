@@ -16,11 +16,14 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- FUNCIONES TÉCNICAS ---
+# --- NÚCLEO TÉCNICO ---
 def get_v2500_metrics(df, slot_col, metodo):
+    # Radio de conversión AMM para V2500 (mm)
+    RADIO_CONV = 165.0 
     if "Vectorial" in metodo:
-        res_x, res_y, RADIO_CONV = 0.0, 0.0, 165.0 
+        res_x, res_y = 0.0, 0.0
         for _, row in df.iterrows():
+            # Prioriza Momento 1, si no existe usa factor físico estándar
             m1 = row.get('Momento1', row.get('Peso', 0) * 16.5)
             angle_rad = math.radians((row[slot_col] - 1) * (360 / 22))
             res_x += float(m1) * math.cos(angle_rad)
@@ -41,25 +44,29 @@ def get_v2500_metrics(df, slot_col, metodo):
 def render_fan(data, slot_col, titulo, bolt_w=0, bolt_s=0):
     fig = go.Figure()
     theta = np.linspace(0, 360, 22, endpoint=False)
+    # Identificar cambios respecto al original
     colores = ["#e74c3c" if row['Slot_Original'] != row['Nuevo_Slot'] else "#2ecc71" for _, row in data.sort_values(by=slot_col).iterrows()]
+    
     fig.add_trace(go.Barpolar(r=[8]*22, theta=theta, width=[14]*22, marker_color=colores, marker_line_color="white"))
+    
     for i in range(22):
         row = data[data[slot_col] == (i+1)].iloc[0]
         fig.add_trace(go.Scatterpolar(r=[6.2], theta=[theta[i]], mode='text', text=[f"A{int(row['Slot_Original'])}"], textfont=dict(size=10, color="white")))
+    
     if bolt_w > 0.05:
         fig.add_trace(go.Scatterpolar(r=[4], theta=[theta[bolt_s-1]], mode='markers+text', marker=dict(symbol="star", size=20, color="#f1c40f"), text=[f"{bolt_w}g"], textposition="bottom center"))
+    
     fig.update_layout(title=titulo, polar=dict(bgcolor='white', angularaxis=dict(tickvals=theta, rotation=90, direction="clockwise")), showlegend=False, height=450)
     return fig
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("📂 Datos")
+    st.header("⚙️ Configuración Única")
     uploaded_file = st.file_uploader("Subir Excel", type=["xlsx"])
     st.divider()
-    st.header("⚙️ Simulación")
-    metodo_calc = st.selectbox("Método:", ["Vectorial (AMM)", "Mitades (Peso)"])
-    ITERACIONES = st.number_input("Iteraciones:", 1000, 100000, 15000, 5000)
-    TOLERANCIA = st.slider("Tolerancia Objetivo (ips)", 0.0, 1.0, 0.20)
+    metodo_calc = st.selectbox("Método de Análisis:", ["Vectorial (AMM)", "Mitades (Peso)"])
+    ITERACIONES = st.number_input("Comprobaciones (Ciclos):", 1000, 100000, 15000, 5000)
+    TOLERANCIA = st.slider("Tolerancia Taller (ips)", 0.0, 1.0, 0.20)
 
 # --- PROCESAMIENTO ---
 if uploaded_file:
@@ -72,69 +79,78 @@ if uploaded_file:
         df_m = df_full[df_full['Motor'] == m_name].copy()
         df_m['Slot_Original'] = df_m['Slot'].astype(int)
         
+        # Calcular estado inicial una sola vez
         v_ini, b_ini, s_ini = get_v2500_metrics(df_m, 'Slot_Original', metodo_calc)
         
-        # CONTENEDOR DE ESTRATEGIAS
-        estrategias = {
-            "1. Máxima Precisión (Mínima Vib.)": {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini},
-            "2. Eficiencia (Mínimo Movimiento < Tol)": {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini},
-            "3. Punto Intermedio": {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
-        }
+        # Estructuras de memoria para las 3 estrategias
+        # Se inicializan todas con el estado actual del motor
+        est_min_vib = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
+        est_eficiencia = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
+        est_balance = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
 
-        # Ejecución de Simulación
+        # BUCLE ÚNICO DE COMPUTACIÓN (Optimización de Recursos)
         progress_bar = st.progress(0)
         for i in range(ITERACIONES):
+            # Generar permutación aleatoria
             temp = df_m.sample(frac=1).reset_index(drop=True)
             temp['Nuevo_Slot'] = range(1, 23)
             vt, bw, bs = get_v2500_metrics(temp, 'Nuevo_Slot', metodo_calc)
             mt = len(temp[temp['Slot_Original'] != temp['Nuevo_Slot']])
             
-            # Lógica Estrategia 1: Solo importa la vibración más baja
-            if vt < estrategias["1. Máxima Precisión (Mínima Vib.)"]["v"]:
-                estrategias["1. Máxima Precisión (Mínima Vib.)"] = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
+            # 1. EVALUAR PARA MÍNIMA VIBRACIÓN
+            if vt < est_min_vib["v"]:
+                est_min_vib = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
             
-            # Lógica Estrategia 2: Estar bajo tolerancia con los mínimos movimientos posibles
+            # 2. EVALUAR PARA EFICIENCIA (Mínimo movimiento dentro de tolerancia)
             if vt <= TOLERANCIA:
-                if mt < estrategias["2. Eficiencia (Mínimo Movimiento < Tol)"]["moves"] or estrategias["2. Eficiencia (Mínimo Movimiento < Tol)"]["v"] > TOLERANCIA:
-                    estrategias["2. Eficiencia (Mínimo Movimiento < Tol)"] = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
+                # Si estamos en tolerancia, preferimos la que tenga menos movimientos
+                if mt < est_eficiencia["moves"] or est_eficiencia["v"] > TOLERANCIA:
+                    est_eficiencia = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
             
-            # Lógica Estrategia 3: Equilibrio (Mejora del 50% con movimientos moderados)
-            if vt < (v_ini * 0.5) and mt < 12:
-                if vt < estrategias["3. Punto Intermedio"]["v"]:
-                    estrategias["3. Punto Intermedio"] = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
+            # 3. EVALUAR PARA PUNTO INTERMEDIO (Mejora significativa con movimientos limitados)
+            if vt < (v_ini * 0.6) and mt <= 10:
+                if vt < est_balance["v"]:
+                    est_balance = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
 
             if i % 3000 == 0: progress_bar.progress(i / ITERACIONES)
         progress_bar.empty()
 
-        # Selector de Estrategia para este motor
+        # SELECTOR DINÁMICO (Usa los datos guardados en memoria)
+        estrategias_finales = {
+            "🚀 Mínima Vibración": est_min_vib,
+            "⚖️ Eficiencia Operativa": est_eficiencia,
+            "🛠️ Balanceado Moderado": est_balance
+        }
+        
         st.markdown("<div class='estrategia-box'>", unsafe_allow_html=True)
-        seleccionada = st.radio(f"Seleccione Plan para {m_name}:", list(estrategias.keys()), horizontal=True, key=f"sel_{idx}")
-        res = estrategias[seleccionada]
+        seleccionada = st.radio(f"Estrategia Seleccionada:", list(estrategias_finales.keys()), horizontal=True, key=f"sel_{idx}")
+        res = estrategias_finales[seleccionada]
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Métricas de Trazabilidad
+        # MÉTRICAS
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("1. Vib. Inicial", f"{v_ini:.2f} ips")
-        c2.metric("2. Vib. tras Movimientos", f"{res['v']:.2f} ips")
-        c3.metric("3. Perno Propuesto", f"{res['bolt']:.2f} g")
-        c4.metric("4. Movimientos", f"{res['moves']}")
+        c1.metric("Vib. Inicial", f"{v_ini:.2f} ips")
+        c2.metric("Vib. tras Movimientos", f"{res['v']:.2f} ips")
+        c3.metric("Perno (Bolt)", f"{res['bolt']:.2f} g")
+        c4.metric("Movimientos", f"{res['moves']}")
 
         g1, g2 = st.columns(2)
         with g1: st.plotly_chart(render_fan(df_m, 'Slot_Original', "AS FOUND"), use_container_width=True)
-        with g2: st.plotly_chart(render_fan(res['df'], 'Nuevo_Slot', f"AS LEFT ({seleccionada})", res['bolt'], res['slot']), use_container_width=True)
+        with g2: st.plotly_chart(render_fan(res['df'], 'Nuevo_Slot', "AS LEFT", res['bolt'], res['slot']), use_container_width=True)
         
+        # TABLA
         df_tab = res['df'][['Slot_Original', 'Peso', 'Nuevo_Slot']].copy()
         df_tab['Acción'] = df_tab.apply(lambda x: "✅ MANTENER" if x['Slot_Original'] == x['Nuevo_Slot'] else f"➔ MOVER AL {int(x['Nuevo_Slot'])}", axis=1)
-        st.table(df_tab.sort_values(by='Slot_Original'))
+        st.table(df_tab.sort_values(by='Slot_Original').style.apply(lambda x: ['background-color: #d4edda' if 'MANTENER' in str(v) else 'background-color: #f8d7da' for v in x], axis=1))
         
         descargas[m_name] = df_tab
 
-    # Exportación
+    # EXPORTACIÓN
     st.divider()
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         for m, d in descargas.items(): d.to_excel(writer, sheet_name=m, index=False)
-    st.download_button("📥 DESCARGAR PLANES DE TRABAJO (EXCEL)", data=output.getvalue(), file_name="Plan_V2500_Final.xlsx")
+    st.download_button("📥 DESCARGAR PLANES SELECCIONADOS (EXCEL)", data=output.getvalue(), file_name="Plan_V2500_Mantenimiento.xlsx")
 
 else:
-    st.info("Cargue el Excel para comparar las 3 estrategias de balanceo.")
+    st.info("Cargue el Excel. El sistema calculará todas las estrategias en un solo ciclo.")
