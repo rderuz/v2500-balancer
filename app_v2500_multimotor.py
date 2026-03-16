@@ -22,7 +22,7 @@ def get_v2500_metrics(df, slot_col, metodo):
     if "Vectorial" in metodo:
         res_x, res_y = 0.0, 0.0
         for _, row in df.iterrows():
-            m1 = row.get('Momento1', row.get('Peso', 0) * 16.5)
+            m1 = row.get('momento1', row.get('peso', 0) * 16.5)
             angle_rad = math.radians((row[slot_col] - 1) * (360 / 22))
             res_x += float(m1) * math.cos(angle_rad)
             res_y += float(m1) * math.sin(angle_rad)
@@ -33,8 +33,8 @@ def get_v2500_metrics(df, slot_col, metodo):
         b_slot = int(((180 - ang) % 360) / (360/22)) + 1
         return v_ips, p_bolt, b_slot
     else:
-        m1_sum = df[df[slot_col] <= 11]['Peso'].sum()
-        m2_sum = df[df[slot_col] > 11]['Peso'].sum()
+        m1_sum = df[df[slot_col] <= 11]['peso'].sum()
+        m2_sum = df[df[slot_col] > 11]['peso'].sum()
         diff = round(abs(m1_sum - m2_sum), 2)
         b_slot = 17 if (m1_sum - m2_sum) > 0 else 6
         return diff, diff, b_slot
@@ -44,15 +44,15 @@ def render_fan(data, slot_col, titulo, bolt_w=0, bolt_s=0):
     theta = np.linspace(0, 360, 22, endpoint=False)
     colores = []
     for _, row in data.sort_values(by=slot_col).iterrows():
-        if 'Nuevo_Slot' in row and 'Slot_Original' in row:
-            colores.append("#e74c3c" if row['Slot_Original'] != row['Nuevo_Slot'] else "#2ecc71")
+        if 'nuevo_slot' in row and 'slot_original' in row:
+            colores.append("#e74c3c" if row['slot_original'] != row['nuevo_slot'] else "#2ecc71")
         else:
             colores.append("#2ecc71")
     
     fig.add_trace(go.Barpolar(r=[8]*22, theta=theta, width=[14]*22, marker_color=colores, marker_line_color="white"))
     for i in range(22):
         row = data[data[slot_col] == (i+1)].iloc[0]
-        label = f"A{int(row['Slot_Original'])}" if 'Slot_Original' in row else f"A{i+1}"
+        label = f"A{int(row['slot_original'])}" if 'slot_original' in row else f"A{i+1}"
         fig.add_trace(go.Scatterpolar(r=[6.2], theta=[theta[i]], mode='text', text=[label], textfont=dict(size=10, color="white")))
     if bolt_w > 0.05:
         fig.add_trace(go.Scatterpolar(r=[4], theta=[theta[bolt_s-1]], mode='markers+text', marker=dict(symbol="star", size=20, color="#f1c40f"), text=[f"{bolt_w}g"], textposition="bottom center"))
@@ -68,7 +68,7 @@ with st.sidebar:
     ITERACIONES = st.number_input("Comprobaciones (Ciclos):", 1000, 100000, 15000, 5000)
     TOLERANCIA = st.slider("Tolerancia Taller (ips)", 0.0, 1.0, 0.20)
 
-# --- LÓGICA DE MEMORIA (SESSION STATE) ---
+# --- LÓGICA DE MEMORIA Y PROCESO ---
 if uploaded_file:
     config_id = f"{uploaded_file.name}_{metodo_calc}_{ITERACIONES}"
     
@@ -76,15 +76,20 @@ if uploaded_file:
         st.session_state.last_config_id = config_id
         st.session_state.resultados_motores = {}
 
-        df_full = pd.read_excel(uploaded_file, engine='openpyxl')
-        df_full.columns = [c.strip().capitalize() for c in df_full.columns]
+        # CARGA Y NORMALIZACIÓN DE COLUMNAS (Para evitar el KeyError)
+        df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
+        df_raw.columns = df_raw.columns.str.strip().str.lower()
         
-        for m_name in df_full['Motor'].unique():
-            df_m = df_full[df_full['Motor'] == m_name].copy()
-            df_m['Slot_Original'] = df_m['Slot'].astype(int)
-            df_m['Nuevo_Slot'] = df_m['Slot_Original']
+        # Mapeo de seguridad para que el código siempre encuentre las columnas
+        # Si la columna se llama 'motor ', se convierte en 'motor'
+        df_full = df_raw.copy()
+        
+        for m_name in df_full['motor'].unique():
+            df_m = df_full[df_full['motor'] == m_name].copy()
+            df_m['slot_original'] = df_m['slot'].astype(int)
+            df_m['nuevo_slot'] = df_m['slot_original']
             
-            v_ini, b_ini, s_ini = get_v2500_metrics(df_m, 'Slot_Original', metodo_calc)
+            v_ini, b_ini, s_ini = get_v2500_metrics(df_m, 'slot_original', metodo_calc)
             
             est_min_vib = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
             est_eficiencia = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
@@ -93,9 +98,9 @@ if uploaded_file:
             progress_bar = st.progress(0)
             for i in range(ITERACIONES):
                 temp = df_m.sample(frac=1).reset_index(drop=True)
-                temp['Nuevo_Slot'] = range(1, 23)
-                vt, bw, bs = get_v2500_metrics(temp, 'Nuevo_Slot', metodo_calc)
-                mt = len(temp[temp['Slot_Original'] != temp['Nuevo_Slot']])
+                temp['nuevo_slot'] = range(1, 23)
+                vt, bw, bs = get_v2500_metrics(temp, 'nuevo_slot', metodo_calc)
+                mt = len(temp[temp['slot_original'] != temp['nuevo_slot']])
                 
                 if vt < est_min_vib["v"]:
                     est_min_vib = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
@@ -117,7 +122,7 @@ if uploaded_file:
                 }
             }
 
-    # --- RENDERIZADO E INSTANTANEIDAD ---
+    # --- RENDERIZADO ---
     plan_taller_hojas = {}
     resumen_motores = []
 
@@ -125,7 +130,7 @@ if uploaded_file:
         st.markdown(f"<div class='motor-header'><h3>📦 MOTOR: {m_name}</h3></div>", unsafe_allow_html=True)
         v_ini, b_ini, s_ini, df_m_ini = datos["ini"]
         
-        seleccionada = st.radio(f"Estrategia Seleccionada para {m_name}:", list(datos["estrategias"].keys()), horizontal=True, key=f"sel_{m_name}")
+        seleccionada = st.radio(f"Estrategia para {m_name}:", list(datos["estrategias"].keys()), horizontal=True, key=f"sel_{m_name}")
         res = datos["estrategias"][seleccionada]
 
         c1, c2, c3, c4 = st.columns(4)
@@ -135,32 +140,25 @@ if uploaded_file:
         c4.metric("Slot Perno", f"{res['slot']}")
 
         g1, g2 = st.columns(2)
-        with g1: st.plotly_chart(render_fan(df_m_ini, 'Slot_Original', "AS FOUND"), use_container_width=True, key=f"p1_{m_name}")
-        with g2: st.plotly_chart(render_fan(res['df'], 'Nuevo_Slot', "AS LEFT", res['bolt'], res['slot']), use_container_width=True, key=f"p2_{m_name}")
+        with g1: st.plotly_chart(render_fan(df_m_ini, 'slot_original', "AS FOUND"), use_container_width=True, key=f"p1_{m_name}")
+        with g2: st.plotly_chart(render_fan(res['df'], 'nuevo_slot', "AS LEFT", res['bolt'], res['slot']), use_container_width=True, key=f"p2_{m_name}")
         
-        df_tab = res['df'][['Slot_Original', 'Peso', 'Nuevo_Slot']].copy()
-        df_tab['Acción'] = df_tab.apply(lambda x: "✅ MANTENER" if x['Slot_Original'] == x['Nuevo_Slot'] else f"➔ AL {int(x['Nuevo_Slot'])}", axis=1)
-        st.table(df_tab.sort_values(by='Slot_Original').style.apply(lambda x: ['background-color: #d4edda' if 'MANTENER' in str(v) else 'background-color: #f8d7da' for v in x], axis=1))
+        df_tab = res['df'][['slot_original', 'peso', 'nuevo_slot']].copy()
+        df_tab['Acción'] = df_tab.apply(lambda x: "✅ MANTENER" if x['slot_original'] == x['nuevo_slot'] else f"➔ AL {int(x['nuevo_slot'])}", axis=1)
+        st.table(df_tab.sort_values(by='slot_original').style.apply(lambda x: ['background-color: #d4edda' if 'MANTENER' in str(v) else 'background-color: #f8d7da' for v in x], axis=1))
         
-        # PREPARAR DATOS PARA EL EXCEL (Incluyendo pernos)
-        export_df = df_tab.sort_values(by='Slot_Original').copy()
-        export_df['Perno_A_Instalar_g'] = res['bolt']
+        export_df = df_tab.sort_values(by='slot_original').copy()
+        export_df['Perno_g'] = res['bolt']
         export_df['Slot_Perno'] = res['slot']
         plan_taller_hojas[m_name] = export_df
-        
-        resumen_motores.append({
-            "Motor": m_name, "Vib_Inicial": v_ini, "Vib_Final": res['v'], 
-            "Peso_Perno_g": res['bolt'], "Slot_Perno": res['slot'], "Movimientos": res['moves']
-        })
+        resumen_motores.append({"Motor": m_name, "Vib_Inicial": v_ini, "Vib_Final": res['v'], "Perno_g": res['bolt'], "Slot_Perno": res['slot']})
 
     st.divider()
-    # EXPORTACIÓN MEJORADA
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        pd.DataFrame(resumen_motores).to_excel(writer, sheet_name="RESUMEN_FLOTA", index=False)
-        for m, d in plan_taller_hojas.items():
-            d.to_excel(writer, sheet_name=f"DETALLE_{m}", index=False)
-    st.download_button("📥 DESCARGAR PLAN DE TALLER CON PERNOS (EXCEL)", data=output.getvalue(), file_name="Plan_Mantenimiento_V2500.xlsx")
+        pd.DataFrame(resumen_motores).to_excel(writer, sheet_name="RESUMEN", index=False)
+        for m, d in plan_taller_hojas.items(): d.to_excel(writer, sheet_name=m[:30], index=False)
+    st.download_button("📥 DESCARGAR PLAN EXCEL", data=output.getvalue(), file_name="Plan_V2500.xlsx")
 
 else:
-    st.info("Cargue el Excel para generar el plan de taller con datos de pernos.")
+    st.info("Suba el Excel para comenzar.")
