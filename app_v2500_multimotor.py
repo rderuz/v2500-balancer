@@ -70,10 +70,8 @@ with st.sidebar:
 
 # --- LÓGICA DE MEMORIA (SESSION STATE) ---
 if uploaded_file:
-    # Generar un ID único para el estado actual de los parámetros
     config_id = f"{uploaded_file.name}_{metodo_calc}_{ITERACIONES}"
     
-    # Solo calculamos si el archivo es nuevo o cambiaron las iteraciones/método
     if "last_config_id" not in st.session_state or st.session_state.last_config_id != config_id:
         st.session_state.last_config_id = config_id
         st.session_state.resultados_motores = {}
@@ -88,13 +86,11 @@ if uploaded_file:
             
             v_ini, b_ini, s_ini = get_v2500_metrics(df_m, 'Slot_Original', metodo_calc)
             
-            # Memorias para este motor
             est_min_vib = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
             est_eficiencia = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
             est_balance = {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini}
 
             progress_bar = st.progress(0)
-            status_text = st.empty()
             for i in range(ITERACIONES):
                 temp = df_m.sample(frac=1).reset_index(drop=True)
                 temp['Nuevo_Slot'] = range(1, 23)
@@ -109,14 +105,9 @@ if uploaded_file:
                 if vt < (v_ini * 0.6) and mt <= 10:
                     if vt < est_balance["v"]:
                         est_balance = {"v": vt, "moves": mt, "df": temp.copy(), "bolt": bw, "slot": bs}
-
-                if i % 3000 == 0:
-                    progress_bar.progress(i / ITERACIONES)
-                    status_text.text(f"Calculando {m_name}... {i}/{ITERACIONES}")
+                if i % 3000 == 0: progress_bar.progress(i / ITERACIONES)
             
             progress_bar.empty()
-            status_text.empty()
-            
             st.session_state.resultados_motores[m_name] = {
                 "ini": (v_ini, b_ini, s_ini, df_m),
                 "estrategias": {
@@ -126,23 +117,22 @@ if uploaded_file:
                 }
             }
 
-    # --- RENDERIZADO (INSTANTÁNEO TRAS LA CARGA) ---
-    descargas = {}
+    # --- RENDERIZADO E INSTANTANEIDAD ---
+    plan_taller_hojas = {}
+    resumen_motores = []
+
     for m_name, datos in st.session_state.resultados_motores.items():
         st.markdown(f"<div class='motor-header'><h3>📦 MOTOR: {m_name}</h3></div>", unsafe_allow_html=True)
-        
         v_ini, b_ini, s_ini, df_m_ini = datos["ini"]
         
-        st.markdown("<div class='estrategia-box'>", unsafe_allow_html=True)
         seleccionada = st.radio(f"Estrategia Seleccionada para {m_name}:", list(datos["estrategias"].keys()), horizontal=True, key=f"sel_{m_name}")
         res = datos["estrategias"][seleccionada]
-        st.markdown("</div>", unsafe_allow_html=True)
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Vib. Inicial", f"{v_ini:.2f} ips")
         c2.metric("Vib. tras Movimientos", f"{res['v']:.2f} ips")
         c3.metric("Perno (Bolt)", f"{res['bolt']:.2f} g")
-        c4.metric("Movimientos", f"{res['moves']}")
+        c4.metric("Slot Perno", f"{res['slot']}")
 
         g1, g2 = st.columns(2)
         with g1: st.plotly_chart(render_fan(df_m_ini, 'Slot_Original', "AS FOUND"), use_container_width=True, key=f"p1_{m_name}")
@@ -151,13 +141,26 @@ if uploaded_file:
         df_tab = res['df'][['Slot_Original', 'Peso', 'Nuevo_Slot']].copy()
         df_tab['Acción'] = df_tab.apply(lambda x: "✅ MANTENER" if x['Slot_Original'] == x['Nuevo_Slot'] else f"➔ AL {int(x['Nuevo_Slot'])}", axis=1)
         st.table(df_tab.sort_values(by='Slot_Original').style.apply(lambda x: ['background-color: #d4edda' if 'MANTENER' in str(v) else 'background-color: #f8d7da' for v in x], axis=1))
-        descargas[m_name] = df_tab
+        
+        # PREPARAR DATOS PARA EL EXCEL (Incluyendo pernos)
+        export_df = df_tab.sort_values(by='Slot_Original').copy()
+        export_df['Perno_A_Instalar_g'] = res['bolt']
+        export_df['Slot_Perno'] = res['slot']
+        plan_taller_hojas[m_name] = export_df
+        
+        resumen_motores.append({
+            "Motor": m_name, "Vib_Inicial": v_ini, "Vib_Final": res['v'], 
+            "Peso_Perno_g": res['bolt'], "Slot_Perno": res['slot'], "Movimientos": res['moves']
+        })
 
     st.divider()
+    # EXPORTACIÓN MEJORADA
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        for m, d in descargas.items(): d.to_excel(writer, sheet_name=m, index=False)
-    st.download_button("📥 DESCARGAR PLANES (EXCEL)", data=output.getvalue(), file_name="Plan_V2500.xlsx")
+        pd.DataFrame(resumen_motores).to_excel(writer, sheet_name="RESUMEN_FLOTA", index=False)
+        for m, d in plan_taller_hojas.items():
+            d.to_excel(writer, sheet_name=f"DETALLE_{m}", index=False)
+    st.download_button("📥 DESCARGAR PLAN DE TALLER CON PERNOS (EXCEL)", data=output.getvalue(), file_name="Plan_Mantenimiento_V2500.xlsx")
 
 else:
-    st.info("Cargue el Excel. El cálculo se realizará una vez y la selección será instantánea.")
+    st.info("Cargue el Excel para generar el plan de taller con datos de pernos.")
