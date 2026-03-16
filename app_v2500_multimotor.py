@@ -3,22 +3,24 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import math
+import time
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="V2500 Balancer Fix", layout="wide")
+st.set_page_config(page_title="V2500 Heavy-Duty Balancer", layout="wide")
 
 st.markdown("""
     <style>
     .stMetric { border: 2px solid #58a6ff; background: #f0f7ff; padding: 10px; border-radius: 8px; }
     .motor-header { background-color: #1e3a8a; color: white; padding: 10px; border-radius: 5px; margin-top: 25px; }
     .info-trim { background-color: #e3f2fd; border-left: 5px solid #2196f3; padding: 15px; margin-top: 10px; color: #0d47a1; font-weight: bold; }
-    .excelencia { border: 2px solid #2ecc71; background: #e8f5e9; padding: 15px; border-radius: 10px; color: #2e7d32; text-align: center; font-weight: bold; }
+    .alert-bolt { background-color: #fff5f5; border-left: 5px solid #ff4b4b; padding: 15px; margin-top: 10px; color: #c53030; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("⚙️ Configuración")
+    st.header("⚙️ Motor de Cálculo")
     uploaded_file = st.file_uploader("Subir Excel", type=["xlsx"])
+    ITERACIONES = st.number_input("Número de comprobaciones:", min_value=1000, max_value=50000, value=15000, step=1000)
     metodo_calc = st.selectbox("Método:", ["Vectorial (AMM)", "Mitades (Peso)"])
     TOLERANCIA_VIB = st.slider("Tolerancia (ips)", 0.0, 1.0, 0.50)
     UMBRAL_EXCELENCIA = 0.10
@@ -63,35 +65,45 @@ if uploaded_file:
         df_m['Nuevo_Slot'] = df_m['Slot_Original']
         
         v_ini, b_w_ini, b_s_ini = get_v2500_metrics(df_m, 'Slot_Original')
-        
-        # EL DSS AHORA EVALUA SI REALMENTE HACE FALTA MOVER
-        if v_ini <= TOLERANCIA_VIB:
-            best = {"v": v_ini, "bolt": b_w_ini, "slot": b_s_ini, "df": df_m.copy(), "moves": 0}
-            msg = f"✅ POSICIÓN ACTUAL OK ({v_ini} ips). Solo instale Perno de {b_w_ini}g en Slot {b_s_ini}."
-            color_msg = "info-trim"
-        else:
-            best = {"v": v_ini, "bolt": b_w_ini, "slot": b_s_ini, "df": df_m.copy(), "moves": 0}
-            for _ in range(5000):
-                temp = df_m.sample(frac=1).reset_index(drop=True)
-                temp['Nuevo_Slot'] = range(1, 23)
-                vt, bw, bs = get_v2500_metrics(temp, 'Nuevo_Slot')
-                mt = len(temp[temp['Slot_Original'] != temp['Nuevo_Slot']])
-                if vt < best["v"]:
-                    best = {"v": vt, "bolt": bw, "slot": bs, "df": temp.copy(), "moves": mt}
-            msg = f"➔ RE-INDEXACIÓN REQUERIDA para bajar de {v_ini} a {best['v']} ips."
-            color_msg = "alert-bolt"
+        best = {"v": v_ini, "bolt": b_w_ini, "slot": b_s_ini, "df": df_m.copy(), "moves": 0}
 
-        st.markdown(f"<div class='{color_msg}'>{msg}</div>", unsafe_allow_html=True)
+        # --- BARRA DE PROGRESO REAL PARA LAS 15,000 COMPROBACIONES ---
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
+        # Lógica de simulación pesada
+        for i in range(ITERACIONES):
+            temp = df_m.sample(frac=1).reset_index(drop=True)
+            temp['Nuevo_Slot'] = range(1, 23)
+            vt, bw, bs = get_v2500_metrics(temp, 'Nuevo_Slot')
+            mt = len(temp[temp['Slot_Original'] != temp['Nuevo_Slot']])
+            
+            if vt < best["v"]:
+                best = {"v": vt, "bolt": bw, "slot": bs, "df": temp.copy(), "moves": mt}
+            
+            # Actualizar barra cada 1000 iteraciones para no ralentizar el navegador
+            if i % 1000 == 0:
+                progress_bar.progress(i / ITERACIONES)
+                status_text.text(f"Analizando combinación {i}/{ITERACIONES}...")
+        
+        progress_bar.empty()
+        status_text.empty()
+
+        # --- PRESENTACIÓN DE RESULTADOS ---
+        if best['moves'] == 0:
+            st.markdown(f"<div class='info-trim'>✅ POSICIÓN ACTUAL ÓPTIMA ({v_ini} ips). Mantenga el orden actual e instale Perno de {b_w_ini}g en Slot {b_s_ini}.</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='alert-bolt'>➔ MEJORA ENCONTRADA: Re-indexar {best['moves']} álabes para bajar a {best['v']} ips + {best['bolt']}g Bolt.</div>", unsafe_allow_html=True)
+
         c1, c2, c3 = st.columns(3)
         c1.metric("Vib. Inicial", f"{v_ini:.2f}")
         c2.metric("Vib. Final", f"{best['v']:.2f}")
-        c3.metric("Mover", f"{best['moves']} álabes")
+        c3.metric("Mover", f"{best['moves']}")
 
         g1, g2 = st.columns(2)
-        with g1: st.plotly_chart(render_fan(df_m, 'Slot_Original', "ACTUAL"), use_container_width=True, key=f"v1_{idx}")
-        with g2: st.plotly_chart(render_fan(best['df'], 'Nuevo_Slot', "PROPUESTA"), use_container_width=True, key=f"v2_{idx}")
+        with g1: st.plotly_chart(render_fan(df_m, 'Slot_Original', "CONFIGURACIÓN ACTUAL"), use_container_width=True, key=f"v1_{idx}")
+        with g2: st.plotly_chart(render_fan(best['df'], 'Nuevo_Slot', "PROPUESTA OPTIMIZADA"), use_container_width=True, key=f"v2_{idx}")
         
         df_tab = best['df'][['Slot_Original', 'Peso', 'Nuevo_Slot']].copy()
-        df_tab['Acción'] = df_tab.apply(lambda x: "✅ OK" if x['Slot_Original'] == x['Nuevo_Slot'] else f"➔ AL {int(x['Nuevo_Slot'])}", axis=1)
+        df_tab['Acción'] = df_tab.apply(lambda x: "✅ MANTENER" if x['Slot_Original'] == x['Nuevo_Slot'] else f"➔ MOVER AL {int(x['Nuevo_Slot'])}", axis=1)
         st.table(df_tab.sort_values(by='Slot_Original'))
