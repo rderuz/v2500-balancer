@@ -6,13 +6,12 @@ import io
 import math
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="V2500 Balancer DSS - Total Fix", layout="wide")
+st.set_page_config(page_title="V2500 Balancer DSS - Professional", layout="wide")
 
 st.markdown("""
     <style>
     .stMetric { border: 2px solid #58a6ff; background: #f0f7ff; padding: 10px; border-radius: 8px; }
     .motor-header { background-color: #1e3a8a; color: white; padding: 10px; border-radius: 5px; margin-top: 25px; }
-    .estrategia-box { background-color: #f1f8ff; border: 1px solid #c8e1ff; padding: 15px; border-radius: 10px; margin-bottom: 20px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -44,24 +43,27 @@ def render_fan(data, slot_col, titulo, bolt_w=0, bolt_s=0, fijos=[], es_propuest
     theta = np.linspace(0, 360, 22, endpoint=False)
     colores = []
     
-    # Asegurar orden por el slot que se visualiza
-    viz_data = data.sort_values(by=slot_col).reset_index()
+    # Asegurar que los datos tengan la columna nuevo_slot para evitar KeyError
+    viz_df = data.copy()
+    if 'nuevo_slot' not in viz_df.columns:
+        viz_df['nuevo_slot'] = viz_df['slot_original']
+        
+    viz_df = viz_df.sort_values(by=slot_col)
     
-    for _, row in viz_data.iterrows():
+    for _, row in viz_df.iterrows():
         if es_propuesta:
             if row['slot_original'] in fijos: colores.append("#bdc3c7")
             elif row['slot_original'] != row['nuevo_slot']: colores.append("#e74c3c")
             else: colores.append("#2ecc71")
         else:
-            colores.append("#2ecc71") # El gráfico inicial siempre es verde (base)
+            colores.append("#2ecc71")
     
     fig.add_trace(go.Barpolar(r=[8]*22, theta=theta, width=[14]*22, marker_color=colores, marker_line_color="white"))
     
     for i in range(22):
-        row = data[data[slot_col] == (i+1)].iloc[0]
-        label = f"A{int(row['slot_original'])}"
+        row = viz_df[viz_df[slot_col] == (i+1)].iloc[0]
         t_color = "black" if (es_propuesta and row['slot_original'] in fijos) else "white"
-        fig.add_trace(go.Scatterpolar(r=[6.2], theta=[theta[i]], mode='text', text=[label], textfont=dict(size=10, color=t_color)))
+        fig.add_trace(go.Scatterpolar(r=[6.2], theta=[theta[i]], mode='text', text=[f"A{int(row['slot_original'])}"], textfont=dict(size=10, color=t_color)))
     
     if bolt_w > 0.05:
         fig.add_trace(go.Scatterpolar(r=[4], theta=[theta[bolt_s-1]], mode='markers+text', marker=dict(symbol="star", size=20, color="#f1c40f"), text=[f"{bolt_w}g"], textposition="bottom center"))
@@ -75,9 +77,9 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Subir Fichero Excel", type=["xlsx"])
     st.divider()
     slots_moviles = st.multiselect("Slots móviles para optimizar:", options=list(range(1, 23)), default=list(range(1, 23)))
-    metodo_calc = st.selectbox("Método de Análisis:", ["Vectorial (AMM)", "Mitades (Peso)"])
-    ITERACIONES = st.number_input("Ciclos de Simulación:", 1000, 100000, 15000, 5000)
-    TOLERANCIA = st.slider("Tolerancia Objetivo (ips)", 0.0, 1.0, 0.20)
+    metodo_calc = st.selectbox("Análisis:", ["Vectorial (AMM)", "Mitades (Peso)"])
+    ITERACIONES = st.number_input("Iteraciones:", 1000, 100000, 15000, 5000)
+    TOLERANCIA = st.slider("Tolerancia Taller (ips)", 0.0, 1.0, 0.20)
 
 # --- PROCESAMIENTO ---
 if uploaded_file and len(slots_moviles) >= 2:
@@ -92,10 +94,13 @@ if uploaded_file and len(slots_moviles) >= 2:
         for m_name in df_raw['motor'].unique():
             df_m = df_raw[df_raw['motor'] == m_name].copy()
             df_m['slot_original'] = df_m['slot'].astype(int)
-            v_ini, b_ini, s_ini = get_v2500_metrics(df_m, 'slot_original', metodo_calc)
+            df_m['nuevo_slot'] = df_m['slot_original'] # INICIALIZACIÓN CRÍTICA
             
-            mems = {k: {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini} for k in ["vib", "efi", "bal"]}
+            v_ini, b_ini, s_ini = get_v2500_metrics(df_m, 'slot_original', metodo_calc)
             fijos = [s for s in range(1, 23) if s not in slots_moviles]
+            
+            # Memorias seguras con nuevo_slot incluido
+            mems = {k: {"v": v_ini, "moves": 0, "df": df_m.copy(), "bolt": b_ini, "slot": s_ini} for k in ["vib", "efi", "bal"]}
             
             pb = st.progress(0)
             for i in range(ITERACIONES):
@@ -119,17 +124,16 @@ if uploaded_file and len(slots_moviles) >= 2:
                 if i % 3000 == 0: pb.progress(i / ITERACIONES)
             pb.empty()
             st.session_state.resultados_motores[m_name] = {
-                "ini": (v_ini, b_ini, s_ini, df_m, fijos),
+                "ini": (v_ini, b_ini, s_ini, df_m.copy(), fijos),
                 "estrategias": {"🚀 Mínima Vibración": mems["vib"], "⚖️ Eficiencia Operativa": mems["efi"], "🛠️ Balanceado Moderado": mems["bal"]}
             }
 
     # --- RENDERIZADO ---
-    plan_taller = {}
-    resumen = []
+    plan_taller, resumen = {}, []
     for m_name, datos in st.session_state.resultados_motores.items():
         st.markdown(f"<div class='motor-header'><h3>📦 MOTOR: {m_name}</h3></div>", unsafe_allow_html=True)
         v_ini, b_ini, s_ini, df_m_ini, fijos = datos["ini"]
-        sel = st.radio(f"Seleccionar Plan:", list(datos["estrategias"].keys()), horizontal=True, key=f"sel_{m_name}")
+        sel = st.radio(f"Plan:", list(datos["estrategias"].keys()), horizontal=True, key=f"sel_{m_name}")
         res = datos["estrategias"][sel]
 
         c1, c2, c3, c4 = st.columns(4)
@@ -139,17 +143,14 @@ if uploaded_file and len(slots_moviles) >= 2:
         c4.metric("Movimientos", f"{res['moves']}")
 
         g1, g2 = st.columns(2)
-        with g1: st.plotly_chart(render_fan(df_m_ini, 'slot_original', "ACTUAL (As Found)"), use_container_width=True, key=f"gra1_{m_name}")
-        with g2: st.plotly_chart(render_fan(res['df'], 'nuevo_slot', "PROPUESTA (As Left)", res['bolt'], res['slot'], fijos, es_propuesta=True), use_container_width=True, key=f"gra2_{m_name}")
+        with g1: st.plotly_chart(render_fan(df_m_ini, 'slot_original', "ACTUAL"), use_container_width=True, key=f"gr1_{m_name}")
+        with g2: st.plotly_chart(render_fan(res['df'], 'nuevo_slot', "PROPUESTA", res['bolt'], res['slot'], fijos, es_propuesta=True), use_container_width=True, key=f"gr2_{m_name}")
         
-        # TABLA REFORZADA
         df_tab = res['df'][['slot_original', 'peso', 'nuevo_slot']].sort_values(by='slot_original').reset_index(drop=True)
         df_tab['Acción'] = df_tab.apply(lambda x: "🔘 BLOQUEADO" if x['slot_original'] in fijos else 
                                        ("✅ MANTENER" if x['slot_original'] == x['nuevo_slot'] else f"➔ AL {int(x['nuevo_slot'])}"), axis=1)
-        
         st.dataframe(df_tab, use_container_width=True)
         
-        # Excel
         exp = df_tab.copy()
         exp['Perno_g'] = ""
         exp.loc[exp['nuevo_slot'] == res['slot'], 'Perno_g'] = res['bolt']
@@ -161,6 +162,6 @@ if uploaded_file and len(slots_moviles) >= 2:
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         pd.DataFrame(resumen).to_excel(writer, sheet_name="RESUMEN", index=False)
         for m, d in plan_taller.items(): d.to_excel(writer, sheet_name=m[:30], index=False)
-    st.download_button("📥 DESCARGAR PLAN", data=output.getvalue(), file_name="Plan_V2500_Total.xlsx")
+    st.download_button("📥 DESCARGAR PLAN", data=output.getvalue(), file_name="Plan_V2500_Final.xlsx")
 else:
     st.info("Suba el Excel para comenzar.")
